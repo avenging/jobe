@@ -23,6 +23,11 @@ class Python3_Task extends Task {
     }
 
     public function compile() {
+
+	$containerManager = $this->dockerinstance->getContainerManager();
+	$containerManager->start($this->containerid);
+	$execManager->$this->dockerinstance->getExexManager() ;
+
         $outputLines = array();
         $returnVar = 0;
         exec("python3 -m py_compile {$this->sourceFileName} 2>compile.out",

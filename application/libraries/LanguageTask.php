@@ -16,6 +16,14 @@ require_once('application/libraries/resultobject.php');
 define('ACTIVE_USERS', 1);  // The key for the shared memory active users array
 define('MAX_RETRIES', 5);   // Maximum retries (1 secs per retry), waiting for free user account
 
+require_once('vendor/autoload.php');
+
+use Docker\Docker;
+use Docker\API\Model\ExecConfig;
+use Docker\API\Model\ExecStartConfig;
+use Docker\API\Model\ContainerConfig;
+
+
 class OverloadException extends Exception {
 }
 
@@ -63,6 +71,10 @@ abstract class Task {
     public $result = Task::RESULT_INTERNAL_ERR;  // Should get overwritten
     public $workdir = '';   // The temporary working directory created in constructor
 
+    public $dockerinstance;
+    public $containderid;
+    public $tar;
+
 
     // For all languages it is necessary to store the source code in a
     // temporary file when constructing the task. A temporary directory
@@ -80,6 +92,7 @@ abstract class Task {
             log_message('error', 'LanguageTask constructor: error making temp directory');
             throw new Exception("Task: error making temp directory (race error?)");
         }
+	$this->tar = new PharData($this->workdir . '/job.tar');
         $this->id = basename($this->workdir);
         $this->input = $input;
         if (empty($filename)) {
@@ -92,6 +105,20 @@ abstract class Task {
         $handle = fopen($this->sourceFileName, "w");
         fwrite($handle, $sourceCode);
         fclose($handle);
+	$this->tar->addFile($this->workdir . '/' . $this->sourceFileName, $this->sourceFileName);
+
+	$this->dockerinstance = new Docker();
+        $containerManager = $this->dockerinstance->getContainerManager();
+
+        $containerConfig = new ContainerConfig();
+        $containerConfig->setUser('jobe') ;
+        $containerConfig->setImage('local/jobe-centos');
+	$containerConfig->setTty(true) ;
+	$containerConfig->setCmd(['/bin/bash']);
+        $containerCreateResult = $containerManager->create($containerConfig);
+	$this->containerid = $containerCreateResult->getId();
+	
+
     }
 
 
@@ -133,7 +160,15 @@ abstract class Task {
                (file_put_contents($destPath, $contents)) === FALSE) {
                 return FALSE;
             }
+	    else {
+                $this->tar->addFile($destPath, $filename);
+            }
         }
+	// Push files into the container created in the constructor
+        $containerManager = $this->dockerinstance->getContainerManager();
+        // Create tar file for PUT stream.
+        $stream = file_get_contents($this->workdir . '/job.tar');
+        $containerManager->putArchive($this->containerid, $stream, [ 'path' => '/home/jobe']);
         return TRUE;
     }
 

@@ -19,12 +19,11 @@
 
 
 if ( ! defined('BASEPATH')) exit('No direct script access allowed');
-
 require_once('application/libraries/REST_Controller.php');
 require_once('application/libraries/LanguageTask.php');
 
 define('MAX_READ', 4096);  // Max bytes to read in popen
-define ('MIN_FILE_IDENTIFIER_SIZE', 8);
+define('MIN_FILE_IDENTIFIER_SIZE', 8);
 define('LANGUAGE_CACHE_FILE', '/tmp/jobe_language_cache_file');
 
 

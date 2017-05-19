@@ -372,6 +372,7 @@ $config['proxy_ips'] = '';
 */
 $config['jobe_max_users'] = 10;
 $config['debugging'] = FALSE;
+$config['usedocker'] = TRUE;
 
 
 /* End of file config.php */
