@@ -11,6 +11,9 @@
  */
 
 require_once('application/libraries/LanguageTask.php');
+use Docker\API\Model\ExecConfig;
+use Docker\API\Model\ExecStartConfig;
+use Docker\API\Model\ContainerConfig;
 
 class C_Task extends Task {
 
@@ -28,20 +31,55 @@ class C_Task extends Task {
     }
 
     public function compile() {
+
         $src = basename($this->sourceFileName);
         $errorFileName = "$src.err";
         $execFileName = "$src.exe";
         $compileargs = $this->getParam('compileargs');
         $linkargs = $this->getParam('linkargs');
-        $cmd = "gcc " . implode(' ', $compileargs) . " -o $execFileName $src " . implode(' ', $linkargs) . " 2>$errorFileName";
-        exec($cmd, $output, $returnVar);
+	$returnVar = 1 ;
+	if ($this->usedocker) {
+
+	        $cmddocker = "gcc " . implode(' ', $compileargs) . " -o " . Task::DOCKER_WORK_DIR . "/" . $execFileName . " " . Task::DOCKER_WORK_DIR . "/" . $src . " " . implode(' ', $linkargs); 
+		// incase no linker args we want rid of the whitespace at the end.
+		$cmddocker = trim($cmddocker) ;
+		$cmddocker = explode(' ', $cmddocker) ;
+	
+		$execManager = $this->dockerinstance->getExecManager() ;
+		$execConfig = new ExecConfig() ;
+		$execConfig->setCmd($cmddocker) ;
+		$execConfig->setAttachStdout(true);
+		$execConfig->setAttachStderr(true);
+		$execStartConfig = new ExecStartConfig() ;
+		$execStartConfig->setDetach(false) ;
+		$execCreateResponse = $execManager->create($this->containerid, $execConfig, []) ;
+		$response = $execManager->start($execCreateResponse->getId(), $execStartConfig, []) ;
+
+		$stream = new \Docker\Stream\DockerRawStream($response->getBody());
+
+                $stream->onStdout(function($stdout) {
+                  });
+                $stream->onStderr(function($stderr) {
+                        $this->cmpinfo = $this->cmpinfo . $stderr;
+                  });
+
+                $stream->wait();
+
+		$returnVar = $execManager->find($execCreateResponse->getId())->getExitCode();
+	}
+	else {
+
+	        $cmd = "gcc " . implode(' ', $compileargs) . " -o $execFileName $src " . implode(' ', $linkargs) . " 2>$errorFileName";
+	        exec($cmd, $output, $returnVar);
+		if ($returnVar != 0) {
+			$this->cmpinfo = file_get_contents($errorFileName);
+		}
+	}
         if ($returnVar == 0) {
             $this->cmpinfo = '';
             $this->executableFileName = $execFileName;
         }
-        else {
-            $this->cmpinfo = file_get_contents($errorFileName);
-        }
+
     }
 
     // A default name for C programs
@@ -52,7 +90,12 @@ class C_Task extends Task {
 
     // The executable is the output from the compilation
     public function getExecutablePath() {
-        return "./" . $this->executableFileName;
+	if ($this->usedocker) {
+	        return Task::DOCKER_WORK_DIR . "/" . $this->executableFileName;
+	}
+	else {
+	        return "./" . $this->executableFileName;
+	}
     }
 
 
