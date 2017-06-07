@@ -76,6 +76,8 @@ abstract class Task {
     public $containderid;
     public $tar;
     public $usedocker = false ;
+    public $tmpstdout = '';    // Temporary output var for docker runs
+    public $tmpstderr = '';    // Temporary output var for docker runs
 
 
     // For all languages it is necessary to store the source code in a
@@ -111,22 +113,41 @@ abstract class Task {
         fclose($handle);
 
 	if ($this->usedocker) {
-		$this->tar = new PharData($this->workdir . '/job.tar');
-		$this->tar->addFile($this->workdir . '/' . $this->sourceFileName, $this->sourceFileName);
+	    $this->tar = new PharData($this->workdir . '/job.tar');
+  	    $this->tar->addFile($this->workdir . '/' . $this->sourceFileName, $this->sourceFileName);
+	    if ($this->input != '') {
+                $f = fopen('prog.in', 'w');
+                fwrite($f, $this->input);
+                fclose($f);
+		$this->tar->addFile($this->workdir . '/prog.in', 'prog.in');
+            }
 
-		$this->dockerinstance = new Docker();
-        	$containerManager = $this->dockerinstance->getContainerManager();
-
-        	$containerConfig = new ContainerConfig();
-        	#$containerConfig->setUser('jobe') ;
-        	$containerConfig->setImage('local/jobe-centos');
-		$containerConfig->setTty(true) ;
-		$containerConfig->setCmd(['/bin/bash']);
-		$containerConfig->setNetworkDisabled(true);
-        	$containerCreateResult = $containerManager->create($containerConfig);
-		$this->containerid = $containerCreateResult->getId();
-		$containerManager->start($containerCreateResult->getId());
 	}
+
+    }
+
+    private function createContainer() {
+
+	$this->dockerinstance = new Docker();
+        $containerManager = $this->dockerinstance->getContainerManager();
+
+        $containerConfig = new ContainerConfig();
+        #$containerConfig->setUser('jobe') ;
+        $containerConfig->setImage('local/jobe-centos');
+	$containerConfig->setTty(true) ;
+	$containerConfig->setCmd(['/bin/bash']);
+	$containerConfig->setNetworkDisabled(true);
+        $containerCreateResult = $containerManager->create($containerConfig);
+	$this->containerid = $containerCreateResult->getId();
+	$containerManager->start($this->containerid);
+
+    }
+
+    private function destroyContainer() {
+
+	$containerManager = $this->dockerinstance->getContainerManager();
+	$containerManager->stop($this->containerid);
+	$containerManager->remove($this->containerid);
 
     }
 
@@ -175,6 +196,7 @@ abstract class Task {
         }
 	if ($this->usedocker) {
 		// Push files into the container created in the constructor
+		$this->createContainer() ;
        		$containerManager = $this->dockerinstance->getContainerManager();
         	// Create tar file for PUT stream.
         	$stream = file_get_contents($this->workdir . '/job.tar');
@@ -252,136 +274,150 @@ abstract class Task {
         sem_release($sem);
     }
 
+    public function dockerExec($cmd, $input = '') {
+
+	$this->tmpstdout = '';
+	$this->tmpstderr = '';
+	$execManager = $this->dockerinstance->getExecManager() ;
+        $execConfig = new ExecConfig() ;
+	if ($input != '') {
+		$cmd = implode(' ', $cmd);
+		$cmd = array("/bin/bash", "-c", "''" . $cmd . " < prog.in''");
+	}
+        $execConfig->setCmd($cmd) ;
+        $execConfig->setAttachStdin(true);
+        $execConfig->setAttachStdout(true);
+        $execConfig->setAttachStderr(true);
+        $execStartConfig = new ExecStartConfig();
+        $execStartConfig->setDetach(false);
+        $execCreateResponse = $execManager->create($this->containerid, $execConfig, []);
+        $response = $execManager->start($execCreateResponse->getId(), $execStartConfig, []);
+
+        $stream = new \Docker\Stream\DockerRawStream($response->getBody());
+
+        $stream->onStdout(function($stdout) {
+        	$this->tmpstdout = $this->tmpstdout . $stdout;
+        });
+        $stream->onStderr(function($stderr) {
+        	$this->tmpstderr = $this->tmpstderr . $stderr;
+        });
+
+        $stream->wait();
+	return array("stdout"=>$this->tmpstdout, "stderr"=>$this->tmpstderr, "retVal"=>$execManager->find($execCreateResponse->getId())->getExitCode());
+
+    }
+
 
     // Execute this task, which must already have been compiled if necessary
     public function execute() {
 
 	# Now run the command
-	try {
-
-            	$filesize = 1000 * $this->getParam('disklimit'); // MB -> kB
+	if ($this->usedocker) {
+	    try {
+                $filesize = 1000 * $this->getParam('disklimit'); // MB -> kB
 	        $streamsize = 1000 * $this->getParam('streamsize'); // MB -> kB
 	        $memsize = 1000 * $this->getParam('memorylimit');
-		$cputime = $this->getParam('cputime');
+	        $cputime = $this->getParam('cputime');
 	        $numProcs = $this->getParam('numprocs');
-		$sandboxCmdBits = array(
-		         "/usr/local/bin/runguard",
-			 "--user=jobe",
-	                 "--group=jobe",
-	                 "--time=$cputime",         // Seconds of execution time allowed
-	                 "--filesize=$filesize",    // Max file sizes
-	                 "--nproc=$numProcs",       // Max num processes/threads for this *user*
-	                 "--no-core",
-        	         "--streamsize=$streamsize");   // Max stdout/stderr sizes
+	        $sandboxCmdBits = array(
+	            "/usr/local/bin/runguard",
+		    "--user=jobe",
+	            "--group=jobe",
+	            "--time=$cputime",         // Seconds of execution time allowed
+	            "--filesize=$filesize",    // Max file sizes
+	            "--nproc=$numProcs",       // Max num processes/threads for this *user*
+	            "--no-core",
+                    "--streamsize=$streamsize");   // Max stdout/stderr sizes
 
-		if ($memsize != 0) {  // Special case: Matlab won't run with a memsize set. TODO: WHY NOT!
-	                $sandboxCmdBits[] = "--memsize=$memsize";
-        	}
-            	$allCmdBits = array_merge($sandboxCmdBits, $this->getRunCommand());
-            	$cmd = implode(' ', $allCmdBits);
-		error_log($cmd);
-
-
-		$execManager = $this->dockerinstance->getExecManager() ;
-		$execConfig = new ExecConfig() ;
-		$execConfig->setCmd($allCmdBits) ;
-		$execConfig->setAttachStdin(true);
-		$execConfig->setAttachStdout(true);
-		$execConfig->setAttachStderr(true);
-		$execStartConfig = new ExecStartConfig();
-		$execStartConfig->setDetach(false);
-		$execCreateResponse = $execManager->create($this->containerid, $execConfig, []);
-		$response = $execManager->start($execCreateResponse->getId(), $execStartConfig, []);
-
-		$stream = new \Docker\Stream\DockerRawStream($response->getBody());
-
-		$stream->onStdout(function($stdout) {
-			$this->stdout = $this->stdout . $stdout;
-		  });
-		$stream->onStderr(function($stderr) {
-			$this->stderr = $this->stderr . $stderr;
-		  });
-	
-		$stream->wait();
-	
+	        if ($memsize != 0) {  // Special case: Matlab won't run with a memsize set. TODO: WHY NOT!
+	            $sandboxCmdBits[] = "--memsize=$memsize";
+                }
+                $allCmdBits = array_merge($sandboxCmdBits, $this->getRunCommand());
+		if ($this->input != '') {
+	   	    $result = $this->dockerExec($allCmdBits, $this->input);
+		}
+		else {
+		    $result = $this->dockerExec($allCmdBits);
+		}
+	        #$this->destroyContainer() ;
+		$this->stdout = $result['stdout'];
+		$this->stderr = $result['stderr'];
 	        $this->stderr = $this->filteredStderr();
 	        $this->diagnose_result();  // Analyse output and set result
-		error_log($this->stderr) ;
-		error_log($this->stdout) ;
+	    }
+	    catch (OverloadException $e) {
+                $this->result = Task::RESULT_SERVER_OVERLOAD;
+                $this->stderr = $e->getMessage();
+            }
 	}
-	catch (OverloadException $e) {
-            $this->result = Task::RESULT_SERVER_OVERLOAD;
-            $this->stderr = $e->getMessage();
-        }
+	else {
+            try {
+                // Establish all the parameters for the job run
 
-	#echo $execManager->find($execCreateResponse->getId())->getExitCode();
+                $userId = $this->getFreeUser();
+                $user = sprintf("jobe%02d", $userId);
+                $filesize = 1000 * $this->getParam('disklimit'); // MB -> kB
+                $streamsize = 1000 * $this->getParam('streamsize'); // MB -> kB
+                $memsize = 1000 * $this->getParam('memorylimit');
+                $cputime = $this->getParam('cputime');
+                $numProcs = $this->getParam('numprocs');
+                $sandboxCmdBits = array(
+                     "sudo " . dirname(__FILE__)  . "/../../runguard/runguard",
+                     "--user=$user",
+                     "--group=jobe",
+                     "--time=$cputime",         // Seconds of execution time allowed
+                     "--filesize=$filesize",    // Max file sizes
+                     "--nproc=$numProcs",       // Max num processes/threads for this *user*
+                     "--no-core",
+                     "--streamsize=$streamsize");   // Max stdout/stderr sizes
 
-#        try {
-            // Establish all the parameters for the job run
+                if ($memsize != 0) {  // Special case: Matlab won't run with a memsize set. TODO: WHY NOT!
+                    $sandboxCmdBits[] = "--memsize=$memsize";
+                }
+                $allCmdBits = array_merge($sandboxCmdBits, $this->getRunCommand());
+                $cmd = implode(' ', $allCmdBits) . " >prog.out 2>prog.err";
 
-#            $userId = $this->getFreeUser();
-#            $user = sprintf("jobe%02d", $userId);
-#            $filesize = 1000 * $this->getParam('disklimit'); // MB -> kB
-#            $streamsize = 1000 * $this->getParam('streamsize'); // MB -> kB
-#            $memsize = 1000 * $this->getParam('memorylimit');
-#            $cputime = $this->getParam('cputime');
-#            $numProcs = $this->getParam('numprocs');
-#            $sandboxCmdBits = array(
-#                 "sudo " . dirname(__FILE__)  . "/../../runguard/runguard",
-#                 "--user=$user",
-#                 "--group=jobe",
-#                 "--time=$cputime",         // Seconds of execution time allowed
-#                 "--filesize=$filesize",    // Max file sizes
-#                 "--nproc=$numProcs",       // Max num processes/threads for this *user*
-#                 "--no-core",
-#                 "--streamsize=$streamsize");   // Max stdout/stderr sizes
+                // Set up the work directory and run the job
+                $workdir = $this->workdir;
+                exec("setfacl -m u:$user:rwX $workdir");  // Give the user RW access
+                chdir($workdir);
+                file_put_contents('prog.cmd', $cmd);
 
-#            if ($memsize != 0) {  // Special case: Matlab won't run with a memsize set. TODO: WHY NOT!
-#                $sandboxCmdBits[] = "--memsize=$memsize";
-#            }
-#            $allCmdBits = array_merge($sandboxCmdBits, $this->getRunCommand());
-#            $cmd = implode(' ', $allCmdBits) . " >prog.out 2>prog.err";
-#
-#            // Set up the work directory and run the job
-#            $workdir = $this->workdir;
-#            exec("setfacl -m u:$user:rwX $workdir");  // Give the user RW access
-#            chdir($workdir);
-#            file_put_contents('prog.cmd', $cmd);
-#
-#            if ($this->input != '') {
-#                $f = fopen('prog.in', 'w');
-#                fwrite($f, $this->input);
-#                fclose($f);
-#                $cmd .= " <prog.in";
-#            }
-#            else {
-#                $cmd .= " </dev/null";
-#            }
-#
-#            $handle = popen($cmd, 'r');
-#            $result = fread($handle, MAX_READ);
-#            pclose($handle);
-#
-#            // Copy results back out into this object
-#
-#            $this->stdout = file_get_contents("$workdir/prog.out");
-#
-#            if (file_exists("$workdir/prog.err")) {
-#                $this->stderr = file_get_contents("$workdir/prog.err");
-#            }
-#
-#            $this->stderr = $this->filteredStderr();
-#            $this->diagnose_result();  // Analyse output and set result
-#        }
-#        catch (OverloadException $e) {
-#            $this->result = Task::RESULT_SERVER_OVERLOAD;
-#            $this->stderr = $e->getMessage();
-#        }
-#        catch (Exception $e) {
-#            $this->result = Task::RESULT_INTERNAL_ERR;
-#            $this->stderr = $e->getMessage();
-#        }
-#
+                if ($this->input != '') {
+                    $f = fopen('prog.in', 'w');
+                    fwrite($f, $this->input);
+                    fclose($f);
+                    $cmd .= " <prog.in";
+                }
+                else {
+                    $cmd .= " </dev/null";
+                }
+
+                $handle = popen($cmd, 'r');
+                $result = fread($handle, MAX_READ);
+                pclose($handle);
+
+                // Copy results back out into this object
+
+                $this->stdout = file_get_contents("$workdir/prog.out");
+ 
+                if (file_exists("$workdir/prog.err")) {
+                    $this->stderr = file_get_contents("$workdir/prog.err");
+                }
+
+                $this->stderr = $this->filteredStderr();
+                $this->diagnose_result();  // Analyse output and set result
+            }
+            catch (OverloadException $e) {
+                $this->result = Task::RESULT_SERVER_OVERLOAD;
+                $this->stderr = $e->getMessage();
+            }
+            catch (Exception $e) {
+                $this->result = Task::RESULT_INTERNAL_ERR;
+                $this->stderr = $e->getMessage();
+            }
+	}
+
         if (isset($userId)) {
             exec("sudo /usr/bin/pkill -9 -u $user"); // Kill any remaining processes
             $this->freeUser($userId);
@@ -454,7 +490,15 @@ abstract class Task {
         list($command, $pattern) = static::getVersionCommand();
         $output = array();
         $retvalue;
-        exec($command . ' 2>&1', $output, $retvalue);
+// Cannot do this in a static funciton
+	//if ($this->usedocker) {
+//		if (!isset($this->dockerinstance)) {
+//			$this->createContainer();
+//		}
+//	}
+//	else {
+	        exec($command . ' 2>&1', $output, $retvalue);
+//	}
     if ($retvalue != 0 || count($output) == 0) {
             return NULL;
         } else {

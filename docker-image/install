@@ -28,8 +28,8 @@ def update_apache_env():
 	
 
 def main():
-#	build_container()
-#	tag_container()
+	build_container()
+	tag_container()
 	update_apache_env()
 
 main()

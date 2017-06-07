@@ -24,21 +24,32 @@ class Python3_Task extends Task {
 
     public function compile() {
 
-	$containerManager = $this->dockerinstance->getContainerManager();
-	$containerManager->start($this->containerid);
-	$execManager->$this->dockerinstance->getExexManager() ;
-
         $outputLines = array();
         $returnVar = 0;
-        exec("python3 -m py_compile {$this->sourceFileName} 2>compile.out",
-                $outputLines, $returnVar);
+	if ($this->usedocker) {
+   	    $cmddocker = "python3 -m py_compile " . Task::DOCKER_WORK_DIR . "/" . $this->sourceFileName;
+            $cmddocker = explode(' ', $cmddocker);
+            $result = $this->dockerExec($cmddocker);
+            $returnVar = $result['retVal'];
+            $this->cmpinfo = $result['stderr'];
+	}
+	else {
+            exec("python3 -m py_compile {$this->sourceFileName} 2>compile.out",
+                    $outputLines, $returnVar);
+	}
         if ($returnVar == 0) {
             $this->cmpinfo = '';
             $this->executableFileName = $this->sourceFileName;
         }
         else {
-            $output = implode("\n", $outputLines);
-            $compileErrs = file_get_contents('compile.out');
+	    if ($this->usedocker) {
+	        $output = $result['stdout'];
+		$compileErrs = $result['stderr'];
+	    }
+	    else {
+                $output = implode("\n", $outputLines);
+                $compileErrs = file_get_contents('compile.out');
+	    }
             if ($output) {
                 $this->cmpinfo = $output . '\n' . $compileErrs;
             } else {
@@ -60,6 +71,11 @@ class Python3_Task extends Task {
 
 
      public function getTargetFile() {
-         return $this->sourceFileName;
+	 if ($this->usedocker) {
+             return Task::DOCKER_WORK_DIR . "/" . $this->sourceFileName;
+	 }
+         else {
+             return $this->sourceFileName;
+         }
      }
 };

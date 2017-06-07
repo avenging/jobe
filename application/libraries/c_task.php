@@ -39,33 +39,13 @@ class C_Task extends Task {
         $linkargs = $this->getParam('linkargs');
 	$returnVar = 1 ;
 	if ($this->usedocker) {
-
 	        $cmddocker = "gcc " . implode(' ', $compileargs) . " -o " . Task::DOCKER_WORK_DIR . "/" . $execFileName . " " . Task::DOCKER_WORK_DIR . "/" . $src . " " . implode(' ', $linkargs); 
 		// incase no linker args we want rid of the whitespace at the end.
-		$cmddocker = trim($cmddocker) ;
-		$cmddocker = explode(' ', $cmddocker) ;
-	
-		$execManager = $this->dockerinstance->getExecManager() ;
-		$execConfig = new ExecConfig() ;
-		$execConfig->setCmd($cmddocker) ;
-		$execConfig->setAttachStdout(true);
-		$execConfig->setAttachStderr(true);
-		$execStartConfig = new ExecStartConfig() ;
-		$execStartConfig->setDetach(false) ;
-		$execCreateResponse = $execManager->create($this->containerid, $execConfig, []) ;
-		$response = $execManager->start($execCreateResponse->getId(), $execStartConfig, []) ;
-
-		$stream = new \Docker\Stream\DockerRawStream($response->getBody());
-
-                $stream->onStdout(function($stdout) {
-                  });
-                $stream->onStderr(function($stderr) {
-                        $this->cmpinfo = $this->cmpinfo . $stderr;
-                  });
-
-                $stream->wait();
-
-		$returnVar = $execManager->find($execCreateResponse->getId())->getExitCode();
+		$cmddocker = trim($cmddocker);
+		$cmddocker = explode(' ', $cmddocker);
+		$result = $this->dockerExec($cmddocker);
+		$returnVar = $result['retVal'];
+		$this->cmpinfo = $result['stderr'];
 	}
 	else {
 
