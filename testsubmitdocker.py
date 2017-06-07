@@ -706,7 +706,7 @@ int main() {
     printf("Hello 2\n");
 }''',
         'sourcefilename': 'test.c',
-        'parameters': { 'numprocs': 15 },
+        'parameters': { 'numprocs': 1 },
         'expect': { 'outcome': 15, 'stdout': 'Hello 1\nHello 2\n' }
     }
 
@@ -946,17 +946,17 @@ def main():
         langs_to_run = set([testcase['language_id'] for testcase in TEST_SET])
     counters = [0, 0, 0]  # Passes, fails, exceptions
     tests_run = 0;
-    #for test in TEST_SET:
-    #    if test['language_id'] in langs_to_run:
-    #        tests_run += 1
-    #        result = run_test(test)
-    #        counters[result] += 1
-    #        if VERBOSE:
-    ##            print('=====================================')
-#
-#    print()
-#    print("{} tests, {} passed, {} failed, {} exceptions".format(
-#        tests_run, counters[0], counters[1], counters[2]))
+    for test in TEST_SET:
+        if test['language_id'] in langs_to_run:
+            tests_run += 1
+            result = run_test(test)
+            counters[result] += 1
+            if VERBOSE:
+                print('=====================================')
+
+    print()
+    print("{} tests, {} passed, {} failed, {} exceptions".format(
+        tests_run, counters[0], counters[1], counters[2]))
 
     if 'c' in langs_to_run:
         check_parallel_submissions()

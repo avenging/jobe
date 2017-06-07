@@ -120,7 +120,7 @@ echo "\n";
 
 
 #var_dump($execManager->inspect($execCreateResponse->getId()));
-$containerManager->stop($containerCreateResult->getId()) ;
-$containerManager->remove($containerCreateResult->getId());
+#$containerManager->stop($containerCreateResult->getId()) ;
+#$containerManager->remove($containerCreateResult->getId());
 
 #var_dump($stream) ;

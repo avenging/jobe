@@ -130,9 +130,8 @@ abstract class Task {
 
 	$this->dockerinstance = new Docker();
         $containerManager = $this->dockerinstance->getContainerManager();
-
         $containerConfig = new ContainerConfig();
-        #$containerConfig->setUser('jobe') ;
+        #$containerConfig->setUser($userId) ;
         $containerConfig->setImage('local/jobe-centos');
 	$containerConfig->setTty(true) ;
 	$containerConfig->setCmd(['/bin/bash']);
@@ -195,7 +194,7 @@ abstract class Task {
             }
         }
 	if ($this->usedocker) {
-		// Push files into the container created in the constructor
+		// Create the container at this point iand push files into the container created 
 		$this->createContainer() ;
        		$containerManager = $this->dockerinstance->getContainerManager();
         	// Create tar file for PUT stream.
@@ -314,6 +313,8 @@ abstract class Task {
 	# Now run the command
 	if ($this->usedocker) {
 	    try {
+	        $userId = $this->getFreeUser();
+                $user = sprintf("jobe%02d", $userId);
                 $filesize = 1000 * $this->getParam('disklimit'); // MB -> kB
 	        $streamsize = 1000 * $this->getParam('streamsize'); // MB -> kB
 	        $memsize = 1000 * $this->getParam('memorylimit');
@@ -321,7 +322,7 @@ abstract class Task {
 	        $numProcs = $this->getParam('numprocs');
 	        $sandboxCmdBits = array(
 	            "/usr/local/bin/runguard",
-		    "--user=jobe",
+		    "--user=$user",
 	            "--group=jobe",
 	            "--time=$cputime",         // Seconds of execution time allowed
 	            "--filesize=$filesize",    // Max file sizes
@@ -339,7 +340,7 @@ abstract class Task {
 		else {
 		    $result = $this->dockerExec($allCmdBits);
 		}
-	        #$this->destroyContainer() ;
+	        $this->destroyContainer() ;
 		$this->stdout = $result['stdout'];
 		$this->stderr = $result['stderr'];
 	        $this->stderr = $this->filteredStderr();
