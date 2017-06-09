@@ -13,14 +13,21 @@
 
 require_once('application/libraries/resultobject.php');
 
-define('ACTIVE_USERS', 1);  // The key for the shared memory active users array
-define('MAX_RETRIES', 5);   // Maximum retries (1 secs per retry), waiting for free user account
+define('DOCKER_ACTIVE_USERS', 1);  // The key for the shared memory active users array
+define('DOCKER_MAX_RETRIES', 5);   // Maximum retries (1 secs per retry), waiting for free user account
 
-class OverloadException extends Exception {
+require_once('vendor/autoload.php');
+
+use Docker\Docker;
+use Docker\API\Model\ExecConfig;
+use Docker\API\Model\ExecStartConfig;
+use Docker\API\Model\ContainerConfig;
+
+class DockerOverloadException extends Exception {
 }
 
 
-abstract class Task {
+abstract class DockerTask {
 
     // Symbolic constants as per ideone API
 
@@ -34,6 +41,8 @@ abstract class Task {
     const RESULT_SERVER_OVERLOAD = 21;
 
     const PROJECT_KEY = 'j';  // For ftok function. Irrelevant (?)
+
+    const DOCKER_WORK_DIR = '/home/jobe';
 
     // Global default parameter values. Can be overridden by subclasses,
     // and then further overridden by the individual run requests.
@@ -60,8 +69,15 @@ abstract class Task {
     public $signal = 0;
     public $stdout = '';    // Output from execution
     public $stderr = '';
-    public $result = Task::RESULT_INTERNAL_ERR;  // Should get overwritten
+    public $result = DockerTask::RESULT_INTERNAL_ERR;  // Should get overwritten
     public $workdir = '';   // The temporary working directory created in constructor
+
+    // Docker related variables
+    public $dockerinstance; // Docker class instance
+    public $containderid; // ID of created container for this run
+    public $tar; // tar file to extract into Docker container
+    public $tmpstdout = '';    // Temporary output var for docker runs
+    public $tmpstderr = '';    // Temporary output var for docker runs
 
 
     // For all languages it is necessary to store the source code in a
@@ -75,11 +91,14 @@ abstract class Task {
     // the webserver or any of the jobe<n> users, running programs will be able
     // to hoover up other students' submissions.
     public function __construct($sourceCode, $filename, $input, $params) {
+
         $this->workdir = tempnam("/home/jobe/runs", "jobe_");
         if (!unlink($this->workdir) || !mkdir($this->workdir)) {
             log_message('error', 'LanguageTask constructor: error making temp directory');
             throw new Exception("Task: error making temp directory (race error?)");
         }
+	// Create tar file for docker
+	$this->tar = new PharData($this->workdir . '/job.tar');
         $this->id = basename($this->workdir);
         $this->input = $input;
         if (empty($filename)) {
@@ -92,6 +111,41 @@ abstract class Task {
         $handle = fopen($this->sourceFileName, "w");
         fwrite($handle, $sourceCode);
         fclose($handle);
+
+	// Add the sourcefile and the input file to the docker tar file
+  	$this->tar->addFile($this->workdir . '/' . $this->sourceFileName, $this->sourceFileName);
+	if ($this->input != '') {
+            $f = fopen('prog.in', 'w');
+            fwrite($f, $this->input);
+            fclose($f);
+	    $this->tar->addFile($this->workdir . '/prog.in', 'prog.in');
+        }
+
+    }
+
+    // Create the docker container for the coderunner run
+    private function createContainer() {
+
+	$this->dockerinstance = new Docker();
+        $containerManager = $this->dockerinstance->getContainerManager();
+        $containerConfig = new ContainerConfig();
+        $containerConfig->setImage('local/jobe-centos');
+	$containerConfig->setTty(true) ;
+	$containerConfig->setCmd(['/bin/bash']);
+	$containerConfig->setNetworkDisabled(true);
+        $containerCreateResult = $containerManager->create($containerConfig);
+	$this->containerid = $containerCreateResult->getId();
+	$containerManager->start($this->containerid);
+
+    }
+
+    // Destroy the container relating to this class instance
+    private function destroyContainer() {
+
+	$containerManager = $this->dockerinstance->getContainerManager();
+	$containerManager->stop($this->containerid);
+	$containerManager->remove($this->containerid);
+
     }
 
 
@@ -107,7 +161,7 @@ abstract class Task {
     // Return the JobeAPI result object to describe the state of this task
     public function resultObject() {
         if ($this->cmpinfo) {
-            $this->result = Task::RESULT_COMPILATION_ERROR;
+            $this->result = DockerTask::RESULT_COMPILATION_ERROR;
         }
         return new ResultObject(
             $this->workdir,
@@ -122,6 +176,8 @@ abstract class Task {
     // Load the specified files into the working directory.
     // The file list is an array of (fileId, filename) pairs.
     // Return False if any are not present.
+    // Create the docker container at this point if it is being used and add the files
+    // to the tar created in the contructor them push it all into the container.
     public function load_files($fileList, $filecachedir) {
         foreach ($fileList as $file) {
             $fileId = $file[0];
@@ -133,7 +189,17 @@ abstract class Task {
                (file_put_contents($destPath, $contents)) === FALSE) {
                 return FALSE;
             }
+	    else {
+                $this->tar->addFile($destPath, $filename);
+            }
         }
+	// Create the container at this point iand push files into the container created 
+	$this->createContainer() ;
+       	$containerManager = $this->dockerinstance->getContainerManager();
+        // Create tar file PUT stream.
+        $stream = file_get_contents($this->workdir . '/job.tar');
+     	// Put all the files for the run into the container
+        $containerManager->putArchive($this->containerid, $stream, [ 'path' => DockerTask::DOCKER_WORK_DIR ]);
         return TRUE;
     }
 
@@ -154,26 +220,27 @@ abstract class Task {
         global $CI;
 
         $numUsers = $CI->config->item('jobe_max_users');
-        $key = ftok(__FILE__,  TASK::PROJECT_KEY);
+        $key = ftok(__FILE__,  DOCKERTASK::PROJECT_KEY);
+	error_log($key);
         $sem = sem_get($key);
         $user = -1;
         $retries = 0;
-        while ($user == -1 && $retries < MAX_RETRIES) {
+        while ($user == -1 && $retries < DOCKER_MAX_RETRIES) {
             sem_acquire($sem);
             $shm = shm_attach($key);
-            if (!shm_has_var($shm, ACTIVE_USERS)) {
+            if (!shm_has_var($shm, DOCKER_ACTIVE_USERS)) {
                 // First time since boot -- initialise active list
                 $active = array();
                 for($i = 0; $i < $numUsers; $i++) {
                     $active[$i] = FALSE;
                 }
-                shm_put_var($shm, ACTIVE_USERS, $active);
+                shm_put_var($shm, DOCKER_ACTIVE_USERS, $active);
             }
-            $active = shm_get_var($shm, ACTIVE_USERS);
+            $active = shm_get_var($shm, DOCKER_ACTIVE_USERS);
             for ($user = 0; $user < $numUsers; $user++) {
                 if (!$active[$user]) {
                     $active[$user] = TRUE;
-                    shm_put_var($shm, ACTIVE_USERS, $active);
+                    shm_put_var($shm, DOCKER_ACTIVE_USERS, $active);
                     break;
                 }
             }
@@ -182,10 +249,10 @@ abstract class Task {
             if ($user == $numUsers) {
                 $user = -1;
                 $retries += 1;
-                if ($retries < MAX_RETRIES) {
+                if ($retries < DOCKER_MAX_RETRIES) {
                     sleep(1);
                 } else {
-                    throw new OverloadException();
+                    throw new DockerOverloadException();
                 }
             }
         }
@@ -199,80 +266,105 @@ abstract class Task {
         $sem = sem_get($key);
         sem_acquire($sem);
         $shm = shm_attach($key);
-        $active = shm_get_var($shm, ACTIVE_USERS);
+        $active = shm_get_var($shm, DOCKER_ACTIVE_USERS);
         $active[$userNum] = FALSE;
-        shm_put_var($shm, ACTIVE_USERS, $active);
+        shm_put_var($shm, DOCKER_ACTIVE_USERS, $active);
         shm_detach($shm);
         sem_release($sem);
+    }
+
+    // Run a docker Exec command within the container instance relating to this class
+    // instance.
+    public function dockerExec($cmd, $input = '') {
+
+	// Need to use temporary output variables incase this is
+	// being run to do the compile.
+        // Relies on the calling function to set the global cmpinfo, stdout or stderr
+        // from the returned data.
+	$this->tmpstdout = '';
+	$this->tmpstderr = '';
+
+	// Grab an exec manager instance
+	$execManager = $this->dockerinstance->getExecManager() ;
+	// Create exec config object
+        $execConfig = new ExecConfig() ;
+        // If there is input we need to change the way the command is run in docker so
+        // that the input redirection works.
+	// Could possibly just run every command this way or change the way the command
+        // is constructed to remove this code.
+	if ($input != '') {
+		$cmd = implode(' ', $cmd);
+		$cmd = array("/bin/bash", "-c", "''" . $cmd . " < prog.in''");
+	}
+        $execConfig->setCmd($cmd) ;
+        $execConfig->setAttachStdin(true);
+        $execConfig->setAttachStdout(true);
+        $execConfig->setAttachStderr(true);
+        $execStartConfig = new ExecStartConfig();
+        $execStartConfig->setDetach(false);
+	// Prepare the exec 
+        $execCreateResponse = $execManager->create($this->containerid, $execConfig, []);
+	// Execute the command
+        $response = $execManager->start($execCreateResponse->getId(), $execStartConfig, []);
+
+	// Response body returns is a stream object that can be used to work out
+	// stdout and stderr (multiplexed in the stream with header info).
+        $stream = new \Docker\Stream\DockerRawStream($response->getBody());
+
+        $stream->onStdout(function($stdout) {
+        	$this->tmpstdout = $this->tmpstdout . $stdout;
+        });
+        $stream->onStderr(function($stderr) {
+        	$this->tmpstderr = $this->tmpstderr . $stderr;
+        });
+
+        $stream->wait();
+	return array("stdout"=>$this->tmpstdout, "stderr"=>$this->tmpstderr, "retVal"=>$execManager->find($execCreateResponse->getId())->getExitCode());
+
     }
 
 
     // Execute this task, which must already have been compiled if necessary
     public function execute() {
 
-        try {
-            // Establish all the parameters for the job run
-
-            $userId = $this->getFreeUser();
+	# Now run the command
+	try {
+	    $userId = $this->getFreeUser();
             $user = sprintf("jobe%02d", $userId);
             $filesize = 1000 * $this->getParam('disklimit'); // MB -> kB
-            $streamsize = 1000 * $this->getParam('streamsize'); // MB -> kB
-            $memsize = 1000 * $this->getParam('memorylimit');
-            $cputime = $this->getParam('cputime');
-            $numProcs = $this->getParam('numprocs');
-            $sandboxCmdBits = array(
-                 "sudo " . dirname(__FILE__)  . "/../../runguard/runguard",
-                 "--user=$user",
-                 "--group=jobe",
-                 "--time=$cputime",         // Seconds of execution time allowed
-                 "--filesize=$filesize",    // Max file sizes
-                 "--nproc=$numProcs",       // Max num processes/threads for this *user*
-                 "--no-core",
-                 "--streamsize=$streamsize");   // Max stdout/stderr sizes
+	    $streamsize = 1000 * $this->getParam('streamsize'); // MB -> kB
+	    $memsize = 1000 * $this->getParam('memorylimit');
+	    $cputime = $this->getParam('cputime');
+	    $numProcs = $this->getParam('numprocs');
+	    $sandboxCmdBits = array(
+	        "/usr/local/bin/runguard",
+	        "--user=$user",
+	        "--group=jobe",
+	        "--time=$cputime",         // Seconds of execution time allowed
+	        "--filesize=$filesize",    // Max file sizes
+	        "--nproc=$numProcs",       // Max num processes/threads for this *user*
+	        "--no-core",
+                "--streamsize=$streamsize");   // Max stdout/stderr sizes
 
-            if ($memsize != 0) {  // Special case: Matlab won't run with a memsize set. TODO: WHY NOT!
-                $sandboxCmdBits[] = "--memsize=$memsize";
+	    if ($memsize != 0) {  // Special case: Matlab won't run with a memsize set. TODO: WHY NOT!
+	        $sandboxCmdBits[] = "--memsize=$memsize";
             }
             $allCmdBits = array_merge($sandboxCmdBits, $this->getRunCommand());
-            $cmd = implode(' ', $allCmdBits) . " >prog.out 2>prog.err";
-
-            // Set up the work directory and run the job
-            $workdir = $this->workdir;
-            exec("setfacl -m u:$user:rwX $workdir");  // Give the user RW access
-            chdir($workdir);
-            file_put_contents('prog.cmd', $cmd);
-
-            if ($this->input != '') {
-                $f = fopen('prog.in', 'w');
-                fwrite($f, $this->input);
-                fclose($f);
-                $cmd .= " <prog.in";
-            }
-            else {
-                $cmd .= " </dev/null";
-            }
-
-            $handle = popen($cmd, 'r');
-            $result = fread($handle, MAX_READ);
-            pclose($handle);
-
-            // Copy results back out into this object
-
-            $this->stdout = file_get_contents("$workdir/prog.out");
-
-            if (file_exists("$workdir/prog.err")) {
-                $this->stderr = file_get_contents("$workdir/prog.err");
-            }
-
-            $this->stderr = $this->filteredStderr();
-            $this->diagnose_result();  // Analyse output and set result
-        }
-        catch (OverloadException $e) {
-            $this->result = Task::RESULT_SERVER_OVERLOAD;
-            $this->stderr = $e->getMessage();
-        }
-        catch (Exception $e) {
-            $this->result = Task::RESULT_INTERNAL_ERR;
+            // Are we executing the program with or without input
+	    if ($this->input != '') {
+	        $result = $this->dockerExec($allCmdBits, $this->input);
+   	    }
+	    else {
+	        $result = $this->dockerExec($allCmdBits);
+	    }
+	    $this->destroyContainer() ;
+	    $this->stdout = $result['stdout'];
+	    $this->stderr = $result['stderr'];
+	    $this->stderr = $this->filteredStderr();
+	    $this->diagnose_result();  // Analyse output and set result
+	}
+	catch (DockerOverloadException $e) {
+            $this->result = DockerTask::RESULT_SERVER_OVERLOAD;
             $this->stderr = $e->getMessage();
         }
 
@@ -348,7 +440,15 @@ abstract class Task {
         list($command, $pattern) = static::getVersionCommand();
         $output = array();
         $retvalue;
-        exec($command . ' 2>&1', $output, $retvalue);
+// Cannot do this in a static funciton
+	//if ($this->usedocker) {
+//		if (!isset($this->dockerinstance)) {
+//			$this->createContainer();
+//		}
+//	}
+//	else {
+	        exec($command . ' 2>&1', $output, $retvalue);
+//	}
     if ($retvalue != 0 || count($output) == 0) {
             return NULL;
         } else {
@@ -371,9 +471,9 @@ abstract class Task {
     // limit exceeded if the language identifies this specifically.
     public function diagnose_result() {
         if (strlen($this->filteredStderr())) {
-            $this->result = TASK::RESULT_RUNTIME_ERROR;
+            $this->result = DOCKERTASK::RESULT_RUNTIME_ERROR;
         } else {
-            $this->result = TASK::RESULT_SUCCESS;
+            $this->result = DOCKERTASK::RESULT_SUCCESS;
         }
 
         // Refine RuntimeError if possible

@@ -10,11 +10,11 @@
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-require_once('application/libraries/LanguageTask.php');
+require_once('application/libraries/docker/DockerLanguageTask.php');
 
-class Python3_Task extends Task {
+class Python3_Task extends DockerTask {
     public function __construct($source, $filename, $input, $params) {
-        Task::__construct($source, $filename, $input, $params);
+        DockerTask::__construct($source, $filename, $input, $params);
         $this->default_params['interpreterargs'] = array('-BE');
     }
 
@@ -23,17 +23,21 @@ class Python3_Task extends Task {
     }
 
     public function compile() {
+
         $outputLines = array();
         $returnVar = 0;
-        exec("python3 -m py_compile {$this->sourceFileName} 2>compile.out",
-                $outputLines, $returnVar);
+   	$cmddocker = "python3 -m py_compile " . DockerTask::DOCKER_WORK_DIR . "/" . $this->sourceFileName;
+        $cmddocker = explode(' ', $cmddocker);
+        $result = $this->dockerExec($cmddocker);
+        $returnVar = $result['retVal'];
+        $this->cmpinfo = $result['stderr'];
         if ($returnVar == 0) {
             $this->cmpinfo = '';
             $this->executableFileName = $this->sourceFileName;
         }
         else {
-            $output = implode("\n", $outputLines);
-            $compileErrs = file_get_contents('compile.out');
+	    $output = $result['stdout'];
+	    $compileErrs = $result['stderr'];
             if ($output) {
                 $this->cmpinfo = $output . '\n' . $compileErrs;
             } else {
@@ -55,6 +59,6 @@ class Python3_Task extends Task {
 
 
      public function getTargetFile() {
-         return $this->sourceFileName;
+         return DockerTask::DOCKER_WORK_DIR . "/" . $this->sourceFileName;
      }
 };

@@ -10,12 +10,15 @@
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-require_once('application/libraries/LanguageTask.php');
+require_once('application/libraries/docker/DockerLanguageTask.php');
+use Docker\API\Model\ExecConfig;
+use Docker\API\Model\ExecStartConfig;
+use Docker\API\Model\ContainerConfig;
 
-class C_Task extends Task {
+class C_Task extends DockerTask {
 
     public function __construct($source, $filename, $input, $params) {
-        Task::__construct($source, $filename, $input, $params);
+        DockerTask::__construct($source, $filename, $input, $params);
         $this->default_params['compileargs'] = array(
             '-Wall',
             '-Werror',
@@ -28,20 +31,24 @@ class C_Task extends Task {
     }
 
     public function compile() {
+
         $src = basename($this->sourceFileName);
         $errorFileName = "$src.err";
         $execFileName = "$src.exe";
         $compileargs = $this->getParam('compileargs');
         $linkargs = $this->getParam('linkargs');
-        $cmd = "gcc " . implode(' ', $compileargs) . " -o $execFileName $src " . implode(' ', $linkargs) . " 2>$errorFileName";
-        exec($cmd, $output, $returnVar);
+	$cmddocker = "gcc " . implode(' ', $compileargs) . " -o " . DockerTask::DOCKER_WORK_DIR . "/" . $execFileName . " " . DockerTask::DOCKER_WORK_DIR . "/" . $src . " " . implode(' ', $linkargs); 
+        // incase no linker args we want rid of the whitespace at the end.
+	$cmddocker = trim($cmddocker);
+	$cmddocker = explode(' ', $cmddocker);
+	$result = $this->dockerExec($cmddocker);
+	$returnVar = $result['retVal'];
+	$this->cmpinfo = $result['stderr'];
         if ($returnVar == 0) {
             $this->cmpinfo = '';
             $this->executableFileName = $execFileName;
         }
-        else {
-            $this->cmpinfo = file_get_contents($errorFileName);
-        }
+
     }
 
     // A default name for C programs
@@ -52,7 +59,7 @@ class C_Task extends Task {
 
     // The executable is the output from the compilation
     public function getExecutablePath() {
-        return "./" . $this->executableFileName;
+	return DockerTask::DOCKER_WORK_DIR . "/" . $this->executableFileName;
     }
 
 
